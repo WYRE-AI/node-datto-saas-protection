@@ -20,6 +20,15 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           fetch-depth: 0
+          # The release job declares `contents: write`, which overrides this repo's
+          # read-only default workflow permission -- so the checkout's default
+          # persisted credential is WRITE-scoped and stays live in .git/config
+          # through `npm ci` below. A compromised dependency lifecycle script
+          # could read it off disk and push. semantic-release authenticates its
+          # own pushes from GITHUB_TOKEN, so it does not need the persisted
+          # credential; `persist-credentials: false` is semantic-release's own
+          # documented GitHub Actions recipe. (CWE-250)
+          persist-credentials: false
 
       - name: Setup Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
