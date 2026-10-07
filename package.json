@@ -4,7 +4,7 @@
   "publishConfig": {
     "registry": "https://npm.pkg.github.com"
   },
-  "description": "Comprehensive, fully-typed Node.js/TypeScript client library for the Datto SaaS Protection (Backupify) REST API",
+  "description": "Fully-typed Node.js/TypeScript client for the Datto SaaS Protection endpoints of the documented Datto REST API",
   "main": "./dist/index.cjs",
   "module": "./dist/index.js",
   "types": "./dist/index.d.ts",

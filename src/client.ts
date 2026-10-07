@@ -6,16 +6,13 @@ import type { DattoSaasProtectionConfig, ResolvedConfig } from './config.js';
 import { resolveConfig } from './config.js';
 import { HttpClient } from './http.js';
 import { RateLimiter } from './rate-limiter.js';
-import { ClientsResource } from './resources/clients.js';
 import { DomainsResource } from './resources/domains.js';
 import { SeatsResource } from './resources/seats.js';
-import { BackupsResource } from './resources/backups.js';
-import { RestoresResource } from './resources/restores.js';
-import { ActivityResource } from './resources/activity.js';
-import { LicenseResource } from './resources/license.js';
+import { ApplicationsResource } from './resources/applications.js';
 
 /**
- * Datto SaaS Protection (Backupify) API client.
+ * Datto SaaS Protection client for the documented Datto REST API
+ * (`https://api.datto.com/v1/saas/...`).
  *
  * @example
  * ```typescript
@@ -24,12 +21,10 @@ import { LicenseResource } from './resources/license.js';
  * const client = new DattoSaasProtectionClient({
  *   publicKey: process.env.DATTO_SAAS_PUBLIC_KEY!,
  *   secretKey: process.env.DATTO_SAAS_SECRET_KEY!,
- *   region: 'us', // or 'eu'
  * });
  *
- * for await (const customer of client.clients.listAll()) {
- *   console.log(customer.id, customer.name);
- * }
+ * const domains = await client.domains.list();
+ * const seats = await client.seats.list(domains[0].saasCustomerId);
  * ```
  */
 export class DattoSaasProtectionClient {
@@ -37,33 +32,21 @@ export class DattoSaasProtectionClient {
   private readonly rateLimiter: RateLimiter;
   private readonly httpClient: HttpClient;
 
-  /** Customer client (organization) operations. */
-  readonly clients: ClientsResource;
-  /** Domain (M365 tenant / Google domain) operations. */
+  /** `GET /saas/domains` — customers/domains and their IDs. */
   readonly domains: DomainsResource;
-  /** Seat (mailbox / OneDrive / SharePoint / Google user) operations. */
+  /** `GET /saas/{id}/seats` and `PUT .../bulkSeatChange`. */
   readonly seats: SeatsResource;
-  /** Backup / restore-point operations. */
-  readonly backups: BackupsResource;
-  /** Restore (queue + poll) operations. */
-  readonly restores: RestoresResource;
-  /** Per-client activity log. */
-  readonly activity: ActivityResource;
-  /** License / seat-usage report. */
-  readonly license: LicenseResource;
+  /** `GET /saas/{id}/applications` and `/detailedBackupStats`. */
+  readonly applications: ApplicationsResource;
 
   constructor(config: DattoSaasProtectionConfig) {
     this.config = resolveConfig(config);
     this.rateLimiter = new RateLimiter(this.config.rateLimit);
     this.httpClient = new HttpClient(this.config, this.rateLimiter);
 
-    this.clients = new ClientsResource(this.httpClient);
     this.domains = new DomainsResource(this.httpClient);
     this.seats = new SeatsResource(this.httpClient);
-    this.backups = new BackupsResource(this.httpClient);
-    this.restores = new RestoresResource(this.httpClient);
-    this.activity = new ActivityResource(this.httpClient);
-    this.license = new LicenseResource(this.httpClient);
+    this.applications = new ApplicationsResource(this.httpClient);
   }
 
   /** Get the resolved configuration. */

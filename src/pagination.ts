@@ -1,96 +1,86 @@
 /**
- * Pagination utilities for the Datto SaaS Protection API.
+ * Pagination helpers for the Datto REST API.
  *
- * SaaS Protection list endpoints use cursor-based pagination. Responses have
- * shape:
+ * Datto list endpoints answer either with a bare JSON array, or with a
+ * page-numbered envelope:
  *
- *     { items: T[], nextCursor: string | null }
+ *     { pagination: { page, perPage, totalPages, count }, items: T[] }
  *
- * Default limit is 50; maximum is 250. Iteration stops when `nextCursor` is
- * null, undefined, or an empty string.
+ * Paged requests use the `_page` / `_perPage` query parameters (Datto REST API
+ * convention, shared with the BCDR surface). {@link fetchAllPages} normalises
+ * both shapes into a flat array, following `totalPages` when present.
  */
 
 import type { HttpClient } from './http.js';
 
-/** Default page size when none is specified. */
-export const DEFAULT_PAGE_LIMIT = 50;
-/** Maximum allowed page size. */
+/** Default `_perPage` when following paged envelopes. */
+export const DEFAULT_PAGE_LIMIT = 100;
+/** Upper bound for `_perPage`. */
 export const MAX_PAGE_LIMIT = 250;
+/** Safety stop so a misbehaving upstream can't loop forever. */
+export const MAX_PAGES = 100;
 
-/**
- * Pagination request parameters.
- */
-export interface PaginationParams {
-  /** Items per page (default 50, max 250). */
-  limit?: number;
-  /** Opaque cursor returned from a previous page. */
-  cursor?: string;
+/** Datto pagination block. */
+export interface DattoPagination {
+  page?: number;
+  perPage?: number;
+  totalPages?: number;
+  count?: number;
 }
 
-/**
- * Generic cursor-paginated response shape.
- */
-export interface PaginatedResponse<T> {
-  items: T[];
-  nextCursor?: string | null;
+/** Datto paged envelope. */
+export interface DattoPagedResponse<T> {
+  pagination?: DattoPagination;
+  items?: T[];
 }
 
-/**
- * Async iterable over every item in a paginated endpoint, automatically
- * fetching subsequent pages as needed.
- */
-export class PaginatedIterable<T> implements AsyncIterable<T> {
-  private readonly httpClient: HttpClient;
-  private readonly path: string;
-  private readonly extraParams: Record<string, string | number | boolean | undefined>;
-  private readonly limit: number;
-  private readonly startCursor: string | undefined;
-
-  constructor(
-    httpClient: HttpClient,
-    path: string,
-    params: PaginationParams | undefined,
-    extraParams?: Record<string, string | number | boolean | undefined>
-  ) {
-    this.httpClient = httpClient;
-    this.path = path;
-    this.extraParams = extraParams ?? {};
-    this.limit = clampLimit(params?.limit);
-    this.startCursor = params?.cursor;
-  }
-
-  async *[Symbol.asyncIterator](): AsyncIterator<T> {
-    let cursor: string | undefined = this.startCursor;
-    while (true) {
-      const params: Record<string, string | number | boolean | undefined> = {
-        ...this.extraParams,
-        limit: this.limit,
-      };
-      if (cursor !== undefined && cursor !== '') params['cursor'] = cursor;
-
-      const response = await this.httpClient.get<PaginatedResponse<T>>(this.path, params);
-
-      const items = response.items ?? [];
-      for (const item of items) yield item;
-
-      const next = response.nextCursor;
-      if (next === null || next === undefined || next === '') return;
-      cursor = next;
-    }
-  }
-
-  /** Collect every item into an array. */
-  async toArray(): Promise<T[]> {
-    const out: T[] = [];
-    for await (const item of this) out.push(item);
-    return out;
-  }
-}
-
-/** Clamp a requested limit into the valid range. */
+/** Clamp a requested page size into the valid range. */
 export function clampLimit(limit: number | undefined): number {
   if (limit === undefined) return DEFAULT_PAGE_LIMIT;
   if (limit < 1) return 1;
   if (limit > MAX_PAGE_LIMIT) return MAX_PAGE_LIMIT;
   return Math.floor(limit);
+}
+
+/** Normalise a Datto list response (bare array or envelope) to an array. */
+export function extractItems<T>(response: unknown): T[] {
+  if (Array.isArray(response)) return response as T[];
+  if (response !== null && typeof response === 'object') {
+    const items = (response as DattoPagedResponse<T>).items;
+    if (Array.isArray(items)) return items;
+  }
+  return [];
+}
+
+/**
+ * GET a Datto list endpoint and return every item.
+ *
+ * The first request is sent without paging params so endpoints that return a
+ * bare array (e.g. `/saas/domains`, `/saas/{id}/seats`) behave exactly as
+ * documented. If the response is a paged envelope with `totalPages > 1`, the
+ * remaining pages are fetched with `_page` / `_perPage`.
+ */
+export async function fetchAllPages<T>(
+  httpClient: HttpClient,
+  path: string,
+  params: Record<string, string | number | boolean | undefined> = {},
+  perPage?: number
+): Promise<T[]> {
+  const first = await httpClient.get<unknown>(path, params);
+  const items = extractItems<T>(first);
+  if (Array.isArray(first) || first === null || typeof first !== 'object') return items;
+
+  const pagination = (first as DattoPagedResponse<T>).pagination;
+  const totalPages = pagination?.totalPages ?? 1;
+  if (totalPages <= 1) return items;
+
+  const size = clampLimit(perPage ?? pagination?.perPage);
+  const lastPage = Math.min(totalPages, MAX_PAGES);
+  for (let page = (pagination?.page ?? 1) + 1; page <= lastPage; page++) {
+    const next = await httpClient.get<unknown>(path, { ...params, _page: page, _perPage: size });
+    const pageItems = extractItems<T>(next);
+    if (pageItems.length === 0) break;
+    items.push(...pageItems);
+  }
+  return items;
 }

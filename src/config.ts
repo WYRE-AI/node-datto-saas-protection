@@ -3,25 +3,32 @@
  */
 
 /**
- * Supported deployment regions.
+ * Accepted region values.
  *
- * Datto SaaS Protection (Backupify) is split across two regional control
- * planes. An API key issued in one region cannot call the other region's
- * endpoints.
+ * Datto publishes ONE REST API host for SaaS Protection: `https://api.datto.com`
+ * (the same host as the BCDR `/v1/bcdr/...` surface). There is no regional
+ * SaaS Protection API host — `api.eu.datto.com` does not resolve in public DNS
+ * (NXDOMAIN, verified 2026-10-07) and the Datto REST API docs list only
+ * `api.datto.com`.
+ *
+ * `region` is retained so existing callers (and stored gateway credentials
+ * that carry `region: "eu"`) keep working, but it no longer changes the host.
+ *
+ * @deprecated The region has no effect; every request goes to api.datto.com.
  */
 export type DattoSaasProtectionRegion = 'us' | 'eu';
 
+/** Datto REST API base for SaaS Protection endpoints. */
+export const DEFAULT_API_URL = 'https://api.datto.com/v1/saas';
+
 /**
- * Per-region base URLs.
+ * Per-region base URLs. Both regions map to the single documented host.
  *
- * The SaaS Protection REST API lives under `/v1/saas/...` on Datto's edge —
- * distinct from the BCDR/PSA `/api/v1/...` surface that shares the same host.
- * Sending SaaS Protection requests to `/api/v1/...` returns 404
- * (`exception.notfoundhttpexception`) from Datto's Symfony layer.
+ * @deprecated Kept for backward compatibility; use {@link DEFAULT_API_URL}.
  */
 export const REGION_BASE_URLS: Readonly<Record<DattoSaasProtectionRegion, string>> = {
-  us: 'https://api.datto.com/v1/saas',
-  eu: 'https://api.eu.datto.com/v1/saas',
+  us: DEFAULT_API_URL,
+  eu: DEFAULT_API_URL,
 };
 
 /** Default region if none is supplied. */
@@ -30,9 +37,8 @@ export const DEFAULT_REGION: DattoSaasProtectionRegion = 'us';
 /**
  * Rate limiting configuration.
  *
- * Datto SaaS Protection enforces 60 requests/minute per API key. The defaults
- * here are intentionally conservative (cap concurrency at 4 in practice) and
- * back off aggressively on 429.
+ * The defaults here are intentionally conservative (60 requests/minute,
+ * concurrency capped at 4) and back off on 429.
  */
 export interface RateLimitConfig {
   /** Whether rate limiting is enabled (default: true) */
@@ -51,9 +57,7 @@ export interface RateLimitConfig {
   maxConcurrency: number;
 }
 
-/**
- * Default rate limit configuration tuned for Datto SaaS Protection (60/min).
- */
+/** Default rate limit configuration. */
 export const DEFAULT_RATE_LIMIT_CONFIG: RateLimitConfig = {
   enabled: true,
   maxRequests: 60,
@@ -67,28 +71,29 @@ export const DEFAULT_RATE_LIMIT_CONFIG: RateLimitConfig = {
 /**
  * Configuration for the Datto SaaS Protection client.
  *
- * SaaS Protection uses HTTP Basic Auth with a public/secret key pair issued
- * from the partner portal — not a single bearer token.
+ * The Datto REST API uses HTTP Basic auth with the public/secret API key pair
+ * created in the Datto Partner Portal (Admin > Integrations > API Keys).
  */
 export interface DattoSaasProtectionConfig {
-  /** Public API key from the SaaS Protection partner portal. */
+  /** Public API key from the Datto Partner Portal. */
   publicKey: string;
-  /** Secret API key from the SaaS Protection partner portal. */
+  /** Secret API key from the Datto Partner Portal. */
   secretKey: string;
-  /** Region to target (default: "us"). */
+  /**
+   * Accepted for backward compatibility; has no effect.
+   * @deprecated There is a single Datto REST API host.
+   */
   region?: DattoSaasProtectionRegion;
   /**
-   * Override the API base URL. When set, this takes precedence over `region`.
-   * Provided for forward-compatibility with future regions.
+   * Override the API base URL (default `https://api.datto.com/v1/saas`).
+   * Intended for tests / proxies.
    */
   apiUrl?: string;
   /** Rate limiting configuration overrides. */
   rateLimit?: Partial<RateLimitConfig>;
 }
 
-/**
- * Resolved configuration with defaults applied.
- */
+/** Resolved configuration with defaults applied. */
 export interface ResolvedConfig {
   publicKey: string;
   secretKey: string;
@@ -97,9 +102,7 @@ export interface ResolvedConfig {
   rateLimit: RateLimitConfig;
 }
 
-/**
- * Resolve a {@link DattoSaasProtectionConfig} by applying defaults.
- */
+/** Resolve a {@link DattoSaasProtectionConfig} by applying defaults. */
 export function resolveConfig(config: DattoSaasProtectionConfig): ResolvedConfig {
   if (!config.publicKey) {
     throw new Error('publicKey must be provided');
@@ -111,8 +114,7 @@ export function resolveConfig(config: DattoSaasProtectionConfig): ResolvedConfig
   if (region !== 'us' && region !== 'eu') {
     throw new Error(`Unsupported region: ${String(region)} (expected "us" or "eu")`);
   }
-  const baseFromRegion = REGION_BASE_URLS[region];
-  const apiUrl = (config.apiUrl ?? baseFromRegion).replace(/\/+$/, '');
+  const apiUrl = (config.apiUrl ?? DEFAULT_API_URL).replace(/\/+$/, '');
   return {
     publicKey: config.publicKey,
     secretKey: config.secretKey,

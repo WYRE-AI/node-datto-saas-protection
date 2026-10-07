@@ -1,20 +1,28 @@
 # @wyre-ai/node-datto-saas-protection
 
-Comprehensive, fully-typed Node.js / TypeScript client library for the
-[Datto SaaS Protection (Backupify) REST API](https://api.datto.com/api/v1).
+Fully-typed Node.js / TypeScript client for the **SaaS Protection endpoints of
+the documented Datto REST API** (`https://api.datto.com/v1/saas`).
 
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
-## Features
+> **v3 re-grounds the library on Datto's documented API.** Earlier versions
+> called `/clients`, `/clients/{id}/domains`, `/seats/{id}/backups` and
+> `/restores`, none of which exist in Datto's API (they return
+> `404 exception.notfoundhttpexception` regardless of credentials). Those
+> resources are removed.
 
-- Full coverage of SaaS Protection endpoints: clients, domains, seats, backups, restores, activity, license
-- Bearer-token authentication
-- Cursor-based pagination via async iterators
-- Rate limiting tuned for the 60 req/min SaaS Protection limit, with concurrency capped at 4
-- Async restore queue + poll helpers (`restores.queue`, `restores.get`, `restores.waitFor`)
-- Typed error hierarchy with a region-mismatch hint baked into 401 messages
-- ESM and CommonJS dual exports, full `.d.ts` types
-- Zero `any` in the public API
+## Endpoints covered
+
+| Method | Path | Client method |
+|---|---|---|
+| GET | `/v1/saas/domains` | `client.domains.list()` |
+| GET | `/v1/saas/{saasCustomerId}/seats` | `client.seats.list(saasCustomerId, { seatType? })` |
+| GET | `/v1/saas/{saasCustomerId}/applications` | `client.applications.list(saasCustomerId, { daysUntil?, includeRemoteID? })` |
+| GET | `/v1/saas/{saasCustomerId}/detailedBackupStats` | `client.applications.detailedBackupStats(saasCustomerId)` |
+| PUT | `/v1/saas/{saasCustomerId}/{externalSubscriptionId}/bulkSeatChange` | `client.seats.bulkChange(saasCustomerId, externalSubscriptionId, { seatType, actionType, ids })` |
+
+References: [Using the Datto REST API for SaaS Protection](https://saasprotection.datto.com/help/M365/Content/Other_Administrative_Tasks/using-rest-api-saas-protection.htm)
+and the authenticated Swagger UI in the Datto Partner Portal (Admin > Integrations > API Keys > Documentation).
 
 ## Install
 
@@ -22,12 +30,7 @@ Comprehensive, fully-typed Node.js / TypeScript client library for the
 npm install @wyre-ai/node-datto-saas-protection
 ```
 
-The package is published to GitHub Packages under the `@wyre-ai` scope.
-Add this to a project-local `.npmrc`:
-
-```
-@wyre-ai:registry=https://npm.pkg.github.com
-```
+(Published to GitHub Packages: add `@wyre-ai:registry=https://npm.pkg.github.com` to `.npmrc`.)
 
 ## Quick start
 
@@ -35,163 +38,59 @@ Add this to a project-local `.npmrc`:
 import { DattoSaasProtectionClient } from '@wyre-ai/node-datto-saas-protection';
 
 const client = new DattoSaasProtectionClient({
-  apiKey: process.env.DATTO_SAAS_API_KEY!,
-  region: 'us', // or 'eu'
+  publicKey: process.env.DATTO_SAAS_PUBLIC_KEY!,
+  secretKey: process.env.DATTO_SAAS_SECRET_KEY!,
 });
 
-// Iterate every customer client, fetching pages on demand
-for await (const customer of client.clients.listAll({ limit: 100 })) {
-  console.log(customer.id, customer.name);
-}
-```
+// 1. Customers / domains — gives saasCustomerId + externalSubscriptionId
+const domains = await client.domains.list();
 
-## Configuration
+// 2. Seats for a customer (remoteId is what bulkSeatChange takes)
+const seats = await client.seats.list(domains[0].saasCustomerId, { seatType: 'User' });
 
-```typescript
-new DattoSaasProtectionClient({
-  apiKey: 'bearer-token',
+// 3. Backup history per application
+const apps = await client.applications.list(domains[0].saasCustomerId, { daysUntil: 7 });
 
-  // Region selection — picks the regional base URL
-  region: 'us', // 'us' | 'eu', default 'us'
-
-  // Optional — override the base URL entirely (forward-compat)
-  apiUrl: 'https://api.datto.com/api/v1',
-
-  // Optional — tune client-side rate limiting
-  rateLimit: {
-    enabled: true,
-    maxRequests: 60,
-    windowMs: 60_000,
-    throttleThreshold: 0.8,
-    retryAfterMs: 5_000,
-    maxRetries: 3,
-    maxConcurrency: 4,
-  },
+// 4. WRITE: license / pause / unlicense up to 100 seats
+await client.seats.bulkChange(domains[0].saasCustomerId, domains[0].externalSubscriptionId!, {
+  seatType: 'User',          // User | SharedMailbox | SharedDrive | Site | TeamSite | Team (case-sensitive)
+  actionType: 'License',     // License | Pause | Unlicense (case-sensitive)
+  ids: seats.slice(0, 10).map((s) => s.remoteId!),
 });
 ```
 
-## Regions
+## Authentication and host
 
-Datto SaaS Protection is split across two regional control planes:
-
-| Region | Base URL                                  |
-| ------ | ----------------------------------------- |
-| `us`   | `https://api.datto.com/api/v1`      |
-| `eu`   | `https://api.eu.datto.com/api/v1`   |
-
-> **Region stickiness**: an API key issued in one region cannot call the
-> other region's endpoints. The upstream API surfaces this as a generic
-> `401 Unauthorized` — the SDK includes a hint in
-> `DattoSaasProtectionAuthenticationError.message` to verify the configured
-> region matches the key.
+The Datto REST API uses HTTP Basic auth with the public/secret API key pair
+from the Datto Partner Portal. There is a single API host, `api.datto.com`;
+Datto does not publish a regional SaaS Protection API host (`api.eu.datto.com`
+does not resolve). The `region` option is still accepted for backward
+compatibility but has no effect.
 
 ## Pagination
 
-Cursor-based:
-
-```
-GET /clients?limit=100
-→ { items: [...], nextCursor: "abc123" }
-
-GET /clients?limit=100&cursor=abc123
-```
-
-Default `limit` is 50, max is 250. Iteration stops automatically when
-`nextCursor` is `null`.
-
-```typescript
-// Single page
-const page = await client.clients.list({ limit: 100 });
-
-// Async iterator across all pages
-for await (const c of client.clients.listAll({ limit: 250 })) { /* ... */ }
-```
-
-## Restores: queue + poll workflow
-
-Restores are asynchronous. Queue with `restores.queue`, then wait for the
-restore to leave the `queued`/`running` state.
-
-```typescript
-const { restoreId } = await client.restores.queue('seat-123', {
-  backupId: 'backup-789',
-});
-
-const final = await client.restores.waitFor(restoreId, {
-  intervalMs: 30_000,    // default — do not poll faster
-  timeoutMs: 60 * 60_000,
-});
-
-if (final.status === 'failed') {
-  console.error('Restore failed:', final.error);
-}
-```
-
-> **Workflow gotcha**: M365 restores into existing users require Graph API
-> permissions on the target tenant. If those permissions are missing the
-> upstream API does NOT reject at queue time — the restore is accepted,
-> transitions to `running`, and then surfaces a `400` once it tries to write.
-> Check `final.status === 'failed'` and `final.error` after `waitFor`.
-
-## Archived seats
-
-Seat list endpoints return only active seats by default. Pass
-`includeArchived: true` to include retained-but-deleted seats:
-
-```typescript
-for await (const seat of client.seats.listAll(clientId, domainId, {
-  includeArchived: true,
-})) {
-  // ...
-}
-```
-
-## API surface
-
-```typescript
-client.clients.list(params)
-client.clients.listAll(params)
-
-client.domains.list(clientId, params)
-client.domains.listAll(clientId, params)
-
-client.seats.list(clientId, domainId, { includeArchived?, ...params })
-client.seats.listAll(clientId, domainId, { includeArchived?, ...params })
-client.seats.get(seatId)
-
-client.backups.list(seatId, params)
-client.backups.listAll(seatId, params)
-
-client.restores.queue(seatId, payload)
-client.restores.get(restoreId)
-client.restores.waitFor(restoreId, { intervalMs?, timeoutMs? })
-
-client.activity.list(clientId, params)
-client.activity.listAll(clientId, params)
-
-client.license.getUsage(clientId)
-```
+`/domains` and `/seats` return bare arrays. Endpoints that answer with Datto's
+paged envelope (`{ pagination: { page, perPage, totalPages }, items }`) are
+followed automatically with `_page` / `_perPage`. All list methods return a
+flat array.
 
 ## Error handling
 
 ```typescript
 import {
-  DattoSaasProtectionError,
   DattoSaasProtectionAuthenticationError,
   DattoSaasProtectionForbiddenError,
   DattoSaasProtectionNotFoundError,
-  DattoSaasProtectionConflictError,
   DattoSaasProtectionRateLimitError,
-  DattoSaasProtectionServerError,
 } from '@wyre-ai/node-datto-saas-protection';
 
 try {
-  await client.seats.get('seat-123');
+  await client.seats.list(12345);
 } catch (err) {
   if (err instanceof DattoSaasProtectionAuthenticationError) {
-    // Region mismatch? Wrong key? Read err.message for the hint.
-  } else if (err instanceof DattoSaasProtectionConflictError) {
-    // A restore is already queued for this seat
+    // 401: bad / inactive key pair
+  } else if (err instanceof DattoSaasProtectionNotFoundError) {
+    // 404: unknown saasCustomerId / externalSubscriptionId
   } else if (err instanceof DattoSaasProtectionRateLimitError) {
     await new Promise((r) => setTimeout(r, err.retryAfter));
   }

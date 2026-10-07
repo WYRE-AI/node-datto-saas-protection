@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   resolveConfig,
   REGION_BASE_URLS,
+  DEFAULT_API_URL,
   DEFAULT_REGION,
   DEFAULT_RATE_LIMIT_CONFIG,
 } from '../../src/config.js';
@@ -21,12 +22,14 @@ describe('resolveConfig', () => {
     const cfg = resolveConfig({ publicKey: 'p', secretKey: 's' });
     expect(cfg.region).toBe(DEFAULT_REGION);
     expect(cfg.region).toBe('us');
-    expect(cfg.apiUrl).toBe(REGION_BASE_URLS.us);
+    expect(cfg.apiUrl).toBe('https://api.datto.com/v1/saas');
   });
 
-  it('resolves the EU base URL when region: "eu"', () => {
+  it('region: "eu" is accepted but resolves to the single documented host', () => {
     const cfg = resolveConfig({ publicKey: 'p', secretKey: 's', region: 'eu' });
-    expect(cfg.apiUrl).toBe(REGION_BASE_URLS.eu);
+    expect(cfg.region).toBe('eu');
+    expect(cfg.apiUrl).toBe(DEFAULT_API_URL);
+    expect(REGION_BASE_URLS.eu).toBe(DEFAULT_API_URL);
   });
 
   it('rejects unsupported regions', () => {
