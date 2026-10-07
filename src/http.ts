@@ -2,8 +2,7 @@
  * HTTP layer for the Datto SaaS Protection API.
  *
  * Authentication is HTTP Basic with a public/secret key pair issued from the
- * SaaS Protection partner portal. Pagination is cursor-based (see
- * {@link ./pagination.ts}).
+ * Datto Partner Portal. List pagination is handled in {@link ./pagination.ts}.
  */
 
 import type { ResolvedConfig } from './config.js';
@@ -43,7 +42,7 @@ export class HttpClient {
    * Make an authenticated request.
    *
    * @param path - API path beginning with "/", relative to the configured base URL
-   *               (e.g. "/clients").
+   *               (e.g. "/domains").
    */
   async request<T>(path: string, options: RequestOptions = {}): Promise<T> {
     const { method = 'GET', body, params } = options;
@@ -60,6 +59,11 @@ export class HttpClient {
   /** Make a JSON POST. */
   async post<T>(path: string, body?: unknown): Promise<T> {
     return this.request<T>(path, { method: 'POST', body });
+  }
+
+  /** Make a JSON PUT. */
+  async put<T>(path: string, body?: unknown): Promise<T> {
+    return this.request<T>(path, { method: 'PUT', body });
   }
 
   private async executeRequest<T>(
@@ -126,20 +130,23 @@ export class HttpClient {
     switch (response.status) {
       case 401:
         throw new DattoSaasProtectionAuthenticationError(
-          `Authentication failed (401). Verify the API key is correct AND that the configured region (currently "${this.config.region}") matches the region where the key was issued — a US key cannot call EU endpoints (and vice versa) and the upstream API surfaces that as a generic 401.`,
+          'Authentication failed (401). Verify the Datto REST API public/secret key pair (Partner Portal > Admin > Integrations > API Keys) and that the key is active.',
           401,
           responseBody
         );
       case 403:
         throw new DattoSaasProtectionForbiddenError(
-          'Access forbidden — API key is out of scope for this client/resource',
+          'Access forbidden (403) — the API key is not permitted to access this SaaS Protection customer/resource',
           responseBody
         );
       case 404:
-        throw new DattoSaasProtectionNotFoundError('Resource not found', responseBody);
+        throw new DattoSaasProtectionNotFoundError(
+          'Not found (404) — unknown saasCustomerId/externalSubscriptionId, or the route does not exist',
+          responseBody
+        );
       case 409:
         throw new DattoSaasProtectionConflictError(
-          'Conflict (409) — a restore may already be queued for this seat',
+          'Conflict (409) — the request conflicts with the current seat state',
           responseBody
         );
       case 429: {
@@ -161,7 +168,9 @@ export class HttpClient {
       }
       default:
         if (response.status >= 500 && response.status <= 599) {
-          if (retryCount === 0) {
+          // Only GETs are retried: a 5xx on a write (bulkSeatChange PUT) may
+          // have been applied upstream, so replaying it blindly is unsafe.
+          if (retryCount === 0 && method === 'GET') {
             await this.sleep(1000);
             return this.executeRequest<T>(url, method, bodyString, 1);
           }

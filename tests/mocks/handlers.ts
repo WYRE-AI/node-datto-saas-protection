@@ -1,208 +1,134 @@
 /**
- * MSW handlers mocking the Datto SaaS Protection API.
+ * MSW handlers mocking the documented Datto REST API SaaS Protection surface:
+ *   GET /v1/saas/domains
+ *   GET /v1/saas/{saasCustomerId}/seats
+ *   GET /v1/saas/{saasCustomerId}/applications
+ *   GET /v1/saas/{saasCustomerId}/detailedBackupStats
+ *   PUT /v1/saas/{saasCustomerId}/{externalSubscriptionId}/bulkSeatChange
  *
- * Both regional base URLs are mocked so we can verify region resolution.
+ * Any other path is unhandled, and tests/setup.ts fails on unhandled requests,
+ * so a regression back to an invented route (e.g. /clients) fails loudly.
  */
 
 import { http, HttpResponse } from 'msw';
 
-const US = 'https://api.datto.com/v1/saas';
-const EU = 'https://api.eu.datto.com/v1/saas';
+const BASE = 'https://api.datto.com/v1/saas';
+const EXPECTED_AUTH = `Basic ${Buffer.from('test-public:test-secret').toString('base64')}`;
 
-interface RestoreRecord {
-  id: string;
-  seatId: string;
-  status: string;
-  pollsRemainingBeforeTerminal: number;
-  terminalStatus: string;
-  error?: string;
-}
+/** Last bulkSeatChange request seen, for body assertions. */
+export const lastBulkRequest: { url?: string; body?: unknown; auth?: string | null } = {};
 
-const restores = new Map<string, RestoreRecord>();
+/** Number of requests per path, for retry assertions. */
+export const requestCounts = new Map<string, number>();
 
-export function resetMockState(): void {
-  restores.clear();
+function errorFor(id: string): Response | undefined {
+  switch (id) {
+    case '401':
+      return HttpResponse.json({ code: 'unauthorized', message: 'Unauthorized' }, { status: 401 });
+    case '403':
+      return HttpResponse.json({ message: 'forbidden' }, { status: 403 });
+    case '404':
+      return HttpResponse.json(
+        { code: 'exception.notfoundhttpexception', message: 'Not Found' },
+        { status: 404 }
+      );
+    case '409':
+      return HttpResponse.json({ message: 'conflict' }, { status: 409 });
+    case '429':
+      return HttpResponse.json(
+        { message: 'slow down' },
+        { status: 429, headers: { 'Retry-After': '0' } }
+      );
+    case '500':
+      return HttpResponse.json({ message: 'boom' }, { status: 500 });
+    default:
+      return undefined;
+  }
 }
 
 export const handlers = [
-  // ---------- US ----------
-
-  // Clients — paginated across two pages
-  http.get(`${US}/clients`, ({ request }) => {
-    const url = new URL(request.url);
-    const cursor = url.searchParams.get('cursor');
-    if (cursor == null || cursor === '') {
-      return HttpResponse.json({
-        items: [
-          { id: 'c1', name: 'Acme Co' },
-          { id: 'c2', name: 'Beta Inc' },
-        ],
-        nextCursor: 'page-2',
-      });
+  http.get(`${BASE}/domains`, ({ request }) => {
+    if (request.headers.get('authorization') !== EXPECTED_AUTH) {
+      return HttpResponse.json({ message: 'Unauthorized' }, { status: 401 });
     }
-    if (cursor === 'page-2') {
-      return HttpResponse.json({
-        items: [{ id: 'c3', name: 'Gamma LLC' }],
-        nextCursor: null,
-      });
-    }
-    return HttpResponse.json({ items: [], nextCursor: null });
+    return HttpResponse.json([
+      {
+        saasCustomerId: 1001,
+        saasCustomerName: 'Acme Co',
+        domain: 'acme.com',
+        productType: 'Office365',
+        externalSubscriptionId: 'Classic:Office365:1001',
+        retentionType: 'Infinite',
+        seatsUsed: 42,
+        organizationId: 7,
+        organizationName: 'Acme',
+        backupStats: { activeServicesCount: 10, activeServicesWithRecentBackupCount: 9, backupPercentage: 90 },
+      },
+      {
+        saasCustomerId: 1002,
+        saasCustomerName: 'Beta Inc',
+        domain: 'beta.io',
+        productType: 'GoogleApps',
+        externalSubscriptionId: 'Classic:GoogleApps:1002',
+        seatsUsed: 5,
+      },
+    ]);
   }),
 
-  // Domains
-  http.get(`${US}/clients/c1/domains`, () =>
-    HttpResponse.json({
-      items: [{ id: 'd1', clientId: 'c1', name: 'acme.com', provider: 'm365' }],
-      nextCursor: null,
-    })
-  ),
-
-  // Seats — supports includeArchived
-  http.get(`${US}/clients/c1/domains/d1/seats`, ({ request }) => {
-    const url = new URL(request.url);
-    const includeArchived = url.searchParams.get('includeArchived') === 'true';
-    const items: Array<{
-      id: string;
-      domainId: string;
-      clientId: string;
-      type: string;
-      email: string;
-      archived?: boolean;
-    }> = [
-      { id: 's1', domainId: 'd1', clientId: 'c1', type: 'mailbox', email: 'a@acme.com' },
-      { id: 's2', domainId: 'd1', clientId: 'c1', type: 'mailbox', email: 'b@acme.com' },
+  http.get(`${BASE}/:customerId/seats`, ({ params, request }) => {
+    const id = String(params['customerId']);
+    const err = errorFor(id);
+    if (err) return err;
+    const seats = [
+      { mainId: 'a@acme.com', name: 'Alice', seatType: 'User', seatState: 'Active', billable: 1, remoteId: 'r-a' },
+      { mainId: 'shared@acme.com', name: 'Shared', seatType: 'SharedMailbox', seatState: 'Unprotected', billable: 0, remoteId: 'r-s' },
+      { mainId: 'https://acme.sharepoint.com/sites/x', name: 'X', seatType: 'Site', seatState: 'Paused', billable: 1, remoteId: 'r-x' },
     ];
-    if (includeArchived) {
-      items.push({
-        id: 's-archived',
-        domainId: 'd1',
-        clientId: 'c1',
-        type: 'mailbox',
-        email: 'gone@acme.com',
-        archived: true,
-      });
-    }
-    return HttpResponse.json({ items, nextCursor: null });
+    const seatType = new URL(request.url).searchParams.get('seatType');
+    return HttpResponse.json(seatType !== null && seatType !== '' ? seats.filter((s) => s.seatType === seatType) : seats);
   }),
 
-  http.get(`${US}/seats/s1`, () =>
-    HttpResponse.json({
-      id: 's1',
-      domainId: 'd1',
-      clientId: 'c1',
-      type: 'mailbox',
-      email: 'a@acme.com',
-    })
-  ),
-
-  // Backups
-  http.get(`${US}/seats/s1/backups`, () =>
-    HttpResponse.json({
-      items: [
-        { id: 'b1', seatId: 's1', startedAt: '2025-04-30T00:00:00Z', status: 'success' },
-        { id: 'b2', seatId: 's1', startedAt: '2025-04-29T00:00:00Z', status: 'success' },
-      ],
-      nextCursor: null,
-    })
-  ),
-
-  // Restores — POST queues
-  http.post(`${US}/seats/:seatId/restores`, ({ params }) => {
-    const seatId = String(params['seatId']);
-    if (seatId === 'seat-conflict') {
-      return HttpResponse.json(
-        { message: 'Restore already in progress for seat' },
-        { status: 409 }
-      );
-    }
-    const id = `r-${Math.random().toString(36).slice(2, 8)}`;
-    restores.set(id, {
-      id,
-      seatId,
-      status: 'queued',
-      pollsRemainingBeforeTerminal: 1,
-      terminalStatus: 'completed',
+  // Paged envelope across two pages (exercises _page/_perPage following).
+  http.get(`${BASE}/:customerId/applications`, ({ params, request }) => {
+    const id = String(params['customerId']);
+    const err = errorFor(id);
+    if (err) return err;
+    const url = new URL(request.url);
+    const page = Number(url.searchParams.get('_page') ?? '1');
+    const report = (n: number): Record<string, unknown> => ({
+      customerId: Number(id),
+      customerName: `Customer ${id}`,
+      daysUntil: url.searchParams.get('daysUntil'),
+      includeRemoteID: url.searchParams.get('includeRemoteID'),
+      suites: [{ suiteType: `suite-${n}`, appTypes: [{ appType: 'Exchange', backupHistory: [] }] }],
     });
-    return HttpResponse.json({ id, seatId, status: 'queued' });
+    return HttpResponse.json({
+      pagination: { page, perPage: 1, totalPages: 2, count: 2 },
+      items: [report(page)],
+    });
   }),
 
-  // Restores — GET polls
-  http.get(`${US}/restores/:restoreId`, ({ params }) => {
-    const restoreId = String(params['restoreId']);
-    const rec = restores.get(restoreId);
-    if (!rec) {
-      return HttpResponse.json({ message: 'Restore not found' }, { status: 404 });
-    }
-    if (rec.pollsRemainingBeforeTerminal > 0) {
-      rec.pollsRemainingBeforeTerminal -= 1;
-      rec.status = 'running';
-    } else {
-      rec.status = rec.terminalStatus;
-    }
-    return HttpResponse.json({ ...rec });
+  http.get(`${BASE}/:customerId/detailedBackupStats`, ({ params, request }) => {
+    const id = String(params['customerId']);
+    const key = `GET ${new URL(request.url).pathname}`;
+    requestCounts.set(key, (requestCounts.get(key) ?? 0) + 1);
+    const err = errorFor(id);
+    if (err) return err;
+    return HttpResponse.json({ tenantId: 't-1', numberOfUsers: 12, region: 'us' });
   }),
 
-  // Activity
-  http.get(`${US}/clients/c1/activity`, () =>
-    HttpResponse.json({
-      items: [{ id: 'a1', clientId: 'c1', timestamp: '2025-04-30T00:00:00Z', type: 'backup' }],
-      nextCursor: null,
-    })
-  ),
-
-  // License
-  http.get(`${US}/clients/c1/usage`, () =>
-    HttpResponse.json({ clientId: 'c1', licensedSeats: 100, usedSeats: 42 })
-  ),
-
-  // Error fixtures
-  http.get(`${US}/clients/UNAUTH`, () =>
-    HttpResponse.json({ message: 'unauthorized' }, { status: 401 })
-  ),
-  http.get(`${US}/clients/FORBIDDEN`, () =>
-    HttpResponse.json({ message: 'forbidden' }, { status: 403 })
-  ),
-  http.get(`${US}/clients/MISSING`, () =>
-    HttpResponse.json({ message: 'not found' }, { status: 404 })
-  ),
-  http.get(`${US}/clients/RATE_LIMITED`, () =>
-    HttpResponse.json(
-      { message: 'rate limited' },
-      { status: 429, headers: { 'Retry-After': '0' } }
-    )
-  ),
-  http.get(`${US}/clients/SERVER_ERROR`, () =>
-    HttpResponse.json({ message: 'boom' }, { status: 500 })
-  ),
-
-  // Direct GET on /clients/<id> for error fixtures (not a real endpoint, used in tests)
-  // The test calls the activity endpoint with the bogus id which 404s naturally;
-  // but to keep things simple we use /clients/{id}/usage to provoke errors.
-  http.get(`${US}/clients/UNAUTH/usage`, () =>
-    HttpResponse.json({ message: 'unauthorized' }, { status: 401 })
-  ),
-  http.get(`${US}/clients/FORBIDDEN/usage`, () =>
-    HttpResponse.json({ message: 'forbidden' }, { status: 403 })
-  ),
-  http.get(`${US}/clients/MISSING/usage`, () =>
-    HttpResponse.json({ message: 'not found' }, { status: 404 })
-  ),
-  http.get(`${US}/clients/RATE_LIMITED/usage`, () =>
-    HttpResponse.json(
-      { message: 'rate limited' },
-      { status: 429, headers: { 'Retry-After': '0' } }
-    )
-  ),
-  http.get(`${US}/clients/SERVER_ERROR/usage`, () =>
-    HttpResponse.json({ message: 'boom' }, { status: 500 })
-  ),
-
-  // ---------- EU ----------
-
-  http.get(`${EU}/clients`, () =>
-    HttpResponse.json({
-      items: [{ id: 'eu-1', name: 'Euro Co' }],
-      nextCursor: null,
-    })
-  ),
+  http.put(`${BASE}/:customerId/:subscriptionId/bulkSeatChange`, async ({ params, request }) => {
+    const id = String(params['customerId']);
+    const key = `PUT ${new URL(request.url).pathname}`;
+    requestCounts.set(key, (requestCounts.get(key) ?? 0) + 1);
+    const err = errorFor(id);
+    if (err) return err;
+    lastBulkRequest.url = request.url;
+    lastBulkRequest.auth = request.headers.get('authorization');
+    lastBulkRequest.body = await request.json();
+    const body = lastBulkRequest.body as { ids: string[]; action_type: string };
+    return HttpResponse.json(
+      body.ids.map((rid, i) => ({ id: i + 1, action: body.action_type, status: 'success', remoteId: rid }))
+    );
+  }),
 ];

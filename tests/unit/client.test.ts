@@ -8,6 +8,7 @@ import {
   DattoSaasProtectionRateLimitError,
   DattoSaasProtectionServerError,
 } from '../../src/errors.js';
+import { lastBulkRequest, requestCounts } from '../mocks/handlers.js';
 
 function makeClient(
   overrides: Partial<ConstructorParameters<typeof DattoSaasProtectionClient>[0]> = {}
@@ -15,158 +16,155 @@ function makeClient(
   return new DattoSaasProtectionClient({
     publicKey: 'test-public',
     secretKey: 'test-secret',
-    region: 'us',
     rateLimit: { maxRetries: 0, retryAfterMs: 1, enabled: false },
     ...overrides,
   });
 }
 
 describe('DattoSaasProtectionClient', () => {
-  it('exposes all resource namespaces', () => {
-    const c = makeClient();
-    expect(c.clients).toBeDefined();
-    expect(c.domains).toBeDefined();
-    expect(c.seats).toBeDefined();
-    expect(c.backups).toBeDefined();
-    expect(c.restores).toBeDefined();
-    expect(c.activity).toBeDefined();
-    expect(c.license).toBeDefined();
-  });
-
-  it('uses the US base URL by default', () => {
-    const c = makeClient();
-    expect(c.getConfig().apiUrl).toBe('https://api.datto.com/v1/saas');
-  });
-
-  it('uses the EU base URL when region: "eu"', async () => {
-    const c = makeClient({ region: 'eu' });
-    expect(c.getConfig().apiUrl).toBe('https://api.eu.datto.com/v1/saas');
-    const page = await c.clients.list({ limit: 50 });
-    expect(page.items[0]?.id).toBe('eu-1');
-  });
-
-  it('lists clients (single page)', async () => {
-    const c = makeClient();
-    const page = await c.clients.list({ limit: 50 });
-    expect(page.items).toHaveLength(2);
-    expect(page.nextCursor).toBe('page-2');
-  });
-
-  it('iterates clients across cursors with listAll', async () => {
-    const c = makeClient();
-    const ids: string[] = [];
-    for await (const cust of c.clients.listAll({ limit: 50 })) {
-      ids.push(cust.id);
+  it('exposes only the documented resource namespaces', () => {
+    const c = makeClient() as unknown as Record<string, unknown>;
+    expect(c['domains']).toBeDefined();
+    expect(c['seats']).toBeDefined();
+    expect(c['applications']).toBeDefined();
+    for (const removed of ['clients', 'backups', 'restores', 'activity', 'license']) {
+      expect(c[removed]).toBeUndefined();
     }
-    expect(ids).toEqual(['c1', 'c2', 'c3']);
   });
 
-  it('lists domains, backups, activity, and gets a seat / usage', async () => {
-    const c = makeClient();
-    expect((await c.domains.list('c1')).items).toHaveLength(1);
-    expect((await c.backups.list('s1')).items).toHaveLength(2);
-    expect((await c.activity.list('c1')).items).toHaveLength(1);
-    expect(await c.seats.get('s1')).toMatchObject({ id: 's1', email: 'a@acme.com' });
-    expect(await c.license.getUsage('c1')).toMatchObject({ usedSeats: 42 });
+  it('targets https://api.datto.com/v1/saas', () => {
+    expect(makeClient().getConfig().apiUrl).toBe('https://api.datto.com/v1/saas');
   });
 
-  it('lists seats without archived by default', async () => {
-    const c = makeClient();
-    const page = await c.seats.list('c1', 'd1');
-    expect(page.items).toHaveLength(2);
-    expect(page.items.every((s) => s.archived !== true)).toBe(true);
+  it('region "eu" still targets the single documented host (no EU API host exists)', () => {
+    expect(makeClient({ region: 'eu' }).getConfig().apiUrl).toBe('https://api.datto.com/v1/saas');
   });
 
-  it('includes archived seats when includeArchived: true', async () => {
-    const c = makeClient();
-    const page = await c.seats.list('c1', 'd1', { includeArchived: true });
-    expect(page.items).toHaveLength(3);
-    expect(page.items.some((s) => s.archived === true)).toBe(true);
-  });
-
-  it('queues a restore and returns the queued status', async () => {
-    const c = makeClient();
-    const queued = await c.restores.queue('s1', { backupId: 'b1' });
-    expect(queued.restoreId).toMatch(/^r-/);
-    expect(queued.status).toBe('queued');
-  });
-
-  it('polls a restore to completion via waitFor', async () => {
-    const c = makeClient();
-    const { restoreId } = await c.restores.queue('s1', { backupId: 'b1' });
-    const final = await c.restores.waitFor(restoreId, {
-      intervalMs: 1,
-      sleep: () => Promise.resolve(),
+  it('GET /saas/domains with Basic auth returns the bare array', async () => {
+    const domains = await makeClient().domains.list();
+    expect(domains).toHaveLength(2);
+    expect(domains[0]).toMatchObject({
+      saasCustomerId: 1001,
+      externalSubscriptionId: 'Classic:Office365:1001',
     });
-    expect(final.status).toBe('completed');
   });
 
-  it('times out waitFor when the restore never reaches a terminal status', async () => {
+  it('a wrong key pair maps to DattoSaasProtectionAuthenticationError', async () => {
+    const c = makeClient({ secretKey: 'wrong' });
+    await expect(c.domains.list()).rejects.toBeInstanceOf(DattoSaasProtectionAuthenticationError);
+  });
+
+  it('GET /saas/{id}/seats returns seats with remoteId', async () => {
+    const seats = await makeClient().seats.list(1001);
+    expect(seats).toHaveLength(3);
+    expect(seats.map((s) => s.remoteId)).toEqual(['r-a', 'r-s', 'r-x']);
+  });
+
+  it('passes seatType as a query filter', async () => {
+    const seats = await makeClient().seats.list(1001, { seatType: 'SharedMailbox' });
+    expect(seats).toHaveLength(1);
+    expect(seats[0]?.seatType).toBe('SharedMailbox');
+  });
+
+  it('GET /saas/{id}/applications follows the paged envelope and forwards params', async () => {
+    const apps = await makeClient().applications.list(1001, { daysUntil: 7, includeRemoteID: true });
+    expect(apps).toHaveLength(2);
+    expect(apps.map((a) => (a.suites as Array<{ suiteType: string }>)[0]?.suiteType)).toEqual([
+      'suite-1',
+      'suite-2',
+    ]);
+    expect(apps[0]).toMatchObject({ daysUntil: '7', includeRemoteID: '1' });
+  });
+
+  it('GET /saas/{id}/detailedBackupStats returns the payload as-is', async () => {
+    expect(await makeClient().applications.detailedBackupStats(1001)).toMatchObject({
+      tenantId: 't-1',
+    });
+  });
+
+  it('PUT bulkSeatChange sends the documented snake_case body', async () => {
+    const res = await makeClient().seats.bulkChange(1001, 'Classic:Office365:1001', {
+      seatType: 'User',
+      actionType: 'License',
+      ids: ['r-a', ' r-b '],
+    });
+    expect(Array.isArray(res)).toBe(true);
+    expect(lastBulkRequest.url).toBe(
+      'https://api.datto.com/v1/saas/1001/Classic%3AOffice365%3A1001/bulkSeatChange'
+    );
+    expect(lastBulkRequest.body).toEqual({ seat_type: 'User', action_type: 'License', ids: ['r-a', 'r-b'] });
+    expect(lastBulkRequest.auth).toMatch(/^Basic /);
+  });
+
+  it('bulkSeatChange validates enums, ids, and the 100-seat cap locally', async () => {
     const c = makeClient();
-    // Use a non-existent restore so polling 404s — but actually that would throw a different error.
-    // Instead, simulate by overriding now() to advance past timeout immediately.
-    const { restoreId } = await c.restores.queue('s1', { backupId: 'b1' });
-    let nowVal = 0;
+    const sub = 'Classic:Office365:1001';
     await expect(
-      c.restores.waitFor(restoreId, {
-        intervalMs: 1,
-        timeoutMs: 10,
-        now: () => {
-          // First call returns 0 (start), subsequent calls return 100 to force timeout
-          const v = nowVal;
-          nowVal = 100;
-          return v;
-        },
-        sleep: () => Promise.resolve(),
+      // @ts-expect-error case-sensitive enum
+      c.seats.bulkChange(1001, sub, { seatType: 'user', actionType: 'License', ids: ['x'] })
+    ).rejects.toThrow(/seatType/);
+    await expect(
+      // @ts-expect-error case-sensitive enum
+      c.seats.bulkChange(1001, sub, { seatType: 'User', actionType: 'license', ids: ['x'] })
+    ).rejects.toThrow(/actionType/);
+    await expect(
+      c.seats.bulkChange(1001, sub, { seatType: 'User', actionType: 'Pause', ids: [] })
+    ).rejects.toThrow(/at least one/);
+    await expect(
+      c.seats.bulkChange(1001, sub, {
+        seatType: 'User',
+        actionType: 'Pause',
+        ids: Array.from({ length: 101 }, (_, i) => `id-${i}`),
       })
-    ).rejects.toThrow(/Timed out/);
+    ).rejects.toThrow(/at most 100/);
+    await expect(
+      c.seats.bulkChange(1001, '', { seatType: 'User', actionType: 'Pause', ids: ['x'] })
+    ).rejects.toThrow(/externalSubscriptionId/);
   });
 
-  it('maps 404 to DattoSaasProtectionNotFoundError', async () => {
-    const c = makeClient();
-    await expect(c.license.getUsage('MISSING')).rejects.toBeInstanceOf(DattoSaasProtectionNotFoundError);
-  });
-
-  it('maps 401 with region-mismatch hint in the message', async () => {
-    const c = makeClient();
-    const err = await c.license.getUsage('UNAUTH').catch((e: unknown) => e);
-    expect(err).toBeInstanceOf(DattoSaasProtectionAuthenticationError);
-    const message = (err as Error).message;
-    expect(message).toMatch(/region/i);
-    expect(message).toMatch(/"us"/);
-  });
-
-  it('maps 403 to DattoSaasProtectionForbiddenError', async () => {
-    const c = makeClient();
-    await expect(c.license.getUsage('FORBIDDEN')).rejects.toBeInstanceOf(DattoSaasProtectionForbiddenError);
-  });
-
-  it('maps 409 to DattoSaasProtectionConflictError when restore already queued', async () => {
-    const c = makeClient();
-    await expect(c.restores.queue('seat-conflict', { backupId: 'b1' })).rejects.toBeInstanceOf(
-      DattoSaasProtectionConflictError
+  it('maps 401 to DattoSaasProtectionAuthenticationError', async () => {
+    await expect(makeClient().seats.list('401')).rejects.toBeInstanceOf(
+      DattoSaasProtectionAuthenticationError
     );
   });
 
+  it('maps 403 to DattoSaasProtectionForbiddenError', async () => {
+    await expect(makeClient().seats.list('403')).rejects.toBeInstanceOf(
+      DattoSaasProtectionForbiddenError
+    );
+  });
+
+  it('maps 404 to DattoSaasProtectionNotFoundError', async () => {
+    await expect(makeClient().seats.list('404')).rejects.toBeInstanceOf(
+      DattoSaasProtectionNotFoundError
+    );
+  });
+
+  it('maps 409 to DattoSaasProtectionConflictError', async () => {
+    await expect(
+      makeClient().seats.bulkChange('409', 'sub', { seatType: 'User', actionType: 'License', ids: ['x'] })
+    ).rejects.toBeInstanceOf(DattoSaasProtectionConflictError);
+  });
+
   it('maps 429 (after retries exhausted) to DattoSaasProtectionRateLimitError', async () => {
-    const c = makeClient();
-    await expect(c.license.getUsage('RATE_LIMITED')).rejects.toBeInstanceOf(
+    await expect(makeClient().seats.list('429')).rejects.toBeInstanceOf(
       DattoSaasProtectionRateLimitError
     );
   });
 
-  it('maps 500 to DattoSaasProtectionServerError after one retry', async () => {
-    const c = makeClient();
-    await expect(c.license.getUsage('SERVER_ERROR')).rejects.toBeInstanceOf(
+  it('maps 500 to DattoSaasProtectionServerError after one GET retry', async () => {
+    requestCounts.clear();
+    await expect(makeClient().applications.detailedBackupStats('500')).rejects.toBeInstanceOf(
       DattoSaasProtectionServerError
     );
+    expect(requestCounts.get('GET /v1/saas/500/detailedBackupStats')).toBe(2);
   });
 
-  it('sends the Authorization: Basic header (verified via successful list call)', async () => {
-    // The handlers do not assert on the header, so this is a smoke test —
-    // a missing header would fail unauthenticated against a real server.
-    const c = makeClient();
-    const page = await c.clients.list();
-    expect(page.items.length).toBeGreaterThan(0);
+  it('does not replay a bulkSeatChange PUT on 5xx', async () => {
+    requestCounts.clear();
+    await expect(
+      makeClient().seats.bulkChange('500', 'sub', { seatType: 'User', actionType: 'License', ids: ['x'] })
+    ).rejects.toBeInstanceOf(DattoSaasProtectionServerError);
+    expect(requestCounts.get('PUT /v1/saas/500/sub/bulkSeatChange')).toBe(1);
   });
 });

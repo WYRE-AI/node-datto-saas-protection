@@ -1,8 +1,8 @@
 /**
  * @wyre-ai/node-datto-saas-protection
  *
- * Comprehensive, fully-typed Node.js/TypeScript client library for the
- * Datto SaaS Protection (Backupify) REST API.
+ * Fully-typed Node.js/TypeScript client for the Datto SaaS Protection
+ * endpoints of the documented Datto REST API (`https://api.datto.com/v1/saas`).
  */
 
 // Main client
@@ -16,6 +16,7 @@ export type {
   ResolvedConfig,
 } from './config.js';
 export {
+  DEFAULT_API_URL,
   DEFAULT_REGION,
   DEFAULT_RATE_LIMIT_CONFIG,
   REGION_BASE_URLS,
@@ -37,26 +38,19 @@ export { buildUrl } from './http.js';
 
 // Pagination
 export {
-  PaginatedIterable,
   clampLimit,
+  extractItems,
+  fetchAllPages,
   DEFAULT_PAGE_LIMIT,
   MAX_PAGE_LIMIT,
+  MAX_PAGES,
 } from './pagination.js';
-export type { PaginationParams, PaginatedResponse } from './pagination.js';
+export type { DattoPagination, DattoPagedResponse } from './pagination.js';
 
 // Resource classes (for typing)
-export { ClientsResource } from './resources/clients.js';
 export { DomainsResource } from './resources/domains.js';
 export { SeatsResource } from './resources/seats.js';
-export { BackupsResource } from './resources/backups.js';
-export {
-  RestoresResource,
-  DEFAULT_RESTORE_POLL_INTERVAL_MS,
-  isTerminal,
-} from './resources/restores.js';
-export type { WaitForRestoreOptions } from './resources/restores.js';
-export { ActivityResource } from './resources/activity.js';
-export { LicenseResource } from './resources/license.js';
+export { ApplicationsResource } from './resources/applications.js';
 
-// Domain types
+// Types
 export * from './types/index.js';

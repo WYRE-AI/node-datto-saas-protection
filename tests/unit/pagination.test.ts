@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   clampLimit,
+  extractItems,
   DEFAULT_PAGE_LIMIT,
   MAX_PAGE_LIMIT,
 } from '../../src/pagination.js';
@@ -21,29 +22,42 @@ describe('clampLimit', () => {
   });
 
   it('passes valid values through (floored)', () => {
-    expect(clampLimit(100)).toBe(100);
+    expect(clampLimit(120)).toBe(120);
     expect(clampLimit(50.7)).toBe(50);
   });
 });
 
 describe('buildUrl', () => {
   it('returns base+path when no params', () => {
-    expect(buildUrl('https://x', '/clients')).toBe('https://x/clients');
+    expect(buildUrl('https://x', '/domains')).toBe('https://x/domains');
   });
 
   it('omits undefined params', () => {
-    expect(buildUrl('https://x', '/clients', { a: 1, b: undefined })).toBe(
-      'https://x/clients?a=1'
+    expect(buildUrl('https://x', '/domains', { a: 1, b: undefined })).toBe(
+      'https://x/domains?a=1'
     );
   });
 
   it('returns base+path when all params are undefined', () => {
-    expect(buildUrl('https://x', '/clients', { a: undefined })).toBe('https://x/clients');
+    expect(buildUrl('https://x', '/domains', { a: undefined })).toBe('https://x/domains');
   });
 
   it('serializes booleans as "true"/"false"', () => {
-    expect(buildUrl('https://x', '/seats', { includeArchived: true })).toBe(
-      'https://x/seats?includeArchived=true'
+    expect(buildUrl('https://x', '/seats', { includeRemoteID: true })).toBe(
+      'https://x/seats?includeRemoteID=true'
     );
+  });
+});
+
+describe('extractItems', () => {
+  it('accepts a bare array', () => {
+    expect(extractItems([1, 2])).toEqual([1, 2]);
+  });
+  it('accepts a Datto paged envelope', () => {
+    expect(extractItems({ pagination: { page: 1, totalPages: 1 }, items: ['a'] })).toEqual(['a']);
+  });
+  it('returns [] for anything else', () => {
+    expect(extractItems(null)).toEqual([]);
+    expect(extractItems({ foo: 1 })).toEqual([]);
   });
 });
