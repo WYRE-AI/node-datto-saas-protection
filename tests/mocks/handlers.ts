@@ -18,6 +18,9 @@ const EXPECTED_AUTH = `Basic ${Buffer.from('test-public:test-secret').toString('
 /** Last bulkSeatChange request seen, for body assertions. */
 export const lastBulkRequest: { url?: string; body?: unknown; auth?: string | null } = {};
 
+/** Number of requests per path, for retry assertions. */
+export const requestCounts = new Map<string, number>();
+
 function errorFor(id: string): Response | undefined {
   switch (id) {
     case '401':
@@ -105,8 +108,10 @@ export const handlers = [
     });
   }),
 
-  http.get(`${BASE}/:customerId/detailedBackupStats`, ({ params }) => {
+  http.get(`${BASE}/:customerId/detailedBackupStats`, ({ params, request }) => {
     const id = String(params['customerId']);
+    const key = `GET ${new URL(request.url).pathname}`;
+    requestCounts.set(key, (requestCounts.get(key) ?? 0) + 1);
     const err = errorFor(id);
     if (err) return err;
     return HttpResponse.json({ tenantId: 't-1', numberOfUsers: 12, region: 'us' });
@@ -114,6 +119,8 @@ export const handlers = [
 
   http.put(`${BASE}/:customerId/:subscriptionId/bulkSeatChange`, async ({ params, request }) => {
     const id = String(params['customerId']);
+    const key = `PUT ${new URL(request.url).pathname}`;
+    requestCounts.set(key, (requestCounts.get(key) ?? 0) + 1);
     const err = errorFor(id);
     if (err) return err;
     lastBulkRequest.url = request.url;

@@ -168,7 +168,9 @@ export class HttpClient {
       }
       default:
         if (response.status >= 500 && response.status <= 599) {
-          if (retryCount === 0) {
+          // Only GETs are retried: a 5xx on a write (bulkSeatChange PUT) may
+          // have been applied upstream, so replaying it blindly is unsafe.
+          if (retryCount === 0 && method === 'GET') {
             await this.sleep(1000);
             return this.executeRequest<T>(url, method, bodyString, 1);
           }

@@ -8,7 +8,7 @@ import {
   DattoSaasProtectionRateLimitError,
   DattoSaasProtectionServerError,
 } from '../../src/errors.js';
-import { lastBulkRequest } from '../mocks/handlers.js';
+import { lastBulkRequest, requestCounts } from '../mocks/handlers.js';
 
 function makeClient(
   overrides: Partial<ConstructorParameters<typeof DattoSaasProtectionClient>[0]> = {}
@@ -152,9 +152,19 @@ describe('DattoSaasProtectionClient', () => {
     );
   });
 
-  it('maps 500 to DattoSaasProtectionServerError after one retry', async () => {
+  it('maps 500 to DattoSaasProtectionServerError after one GET retry', async () => {
+    requestCounts.clear();
     await expect(makeClient().applications.detailedBackupStats('500')).rejects.toBeInstanceOf(
       DattoSaasProtectionServerError
     );
+    expect(requestCounts.get('GET /v1/saas/500/detailedBackupStats')).toBe(2);
+  });
+
+  it('does not replay a bulkSeatChange PUT on 5xx', async () => {
+    requestCounts.clear();
+    await expect(
+      makeClient().seats.bulkChange('500', 'sub', { seatType: 'User', actionType: 'License', ids: ['x'] })
+    ).rejects.toBeInstanceOf(DattoSaasProtectionServerError);
+    expect(requestCounts.get('PUT /v1/saas/500/sub/bulkSeatChange')).toBe(1);
   });
 });
